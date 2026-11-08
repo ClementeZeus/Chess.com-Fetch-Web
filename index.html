@@ -4,20 +4,50 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chess Stats</title>
+<link rel="icon" type="image/png" href="pawn.png">
+<link rel="apple-touch-icon" href="pawn.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,600;0,9..144,700;0,9..144,900;1,9..144,500;1,9..144,600&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
 </head>
 <body>
 
-<header class="topbar">
-  <img class="logo" src="pawn.png" alt="Pawn">
-  <h1>Chess Stats</h1>
+<!-- loading screen -->
+<div id="loading-screen" class="loading-screen" aria-hidden="true">
+  <div class="loading-stage">
+    <div class="loading-rank">
+      <span class="loading-sq"></span><span class="loading-sq"></span><span class="loading-sq"></span>
+      <span class="loading-sq"></span><span class="loading-sq"></span><span class="loading-sq"></span>
+      <span class="loading-sq"></span><span class="loading-sq"></span>
+      <img class="loading-pawn" src="pawn.png" alt="">
+    </div>
+  </div>
+  <p class="loading-text">setting up the board<span class="loading-dots"><i></i><i></i><i></i></span></p>
+</div>
+
+<div class="table-felt" aria-hidden="true"></div>
+
+<main id="app" class="app">
+
+<header class="topbar" style="--i:0">
+  <span class="topbar-plaque">
+    <img class="logo" src="pawn.png" alt="Pawn">
+  </span>
+  <div class="topbar-text">
+    <h1>Chess Stats</h1>
+    <span class="topbar-sub">a ledger of every move that mattered</span>
+  </div>
+  <span class="topbar-piece" aria-hidden="true">&#9816;</span>
 </header>
 
 <p id="error" class="error" hidden></p>
 
-<section id="profile" class="profile" hidden>
-  <img id="avatar" alt="">
+<section id="profile" class="profile" hidden style="--i:1">
+  <div class="profile-seal">
+    <img id="avatar" alt="">
+  </div>
   <div class="profile-info">
     <p id="display-name" class="name"></p>
     <p id="handle" class="handle"></p>
@@ -27,12 +57,13 @@
       <span id="total-games"></span>
     </div>
   </div>
-  <a id="challenge-link" class="challenge-btn" target="_blank" rel="noopener">Challenge me</a>
+  <a id="challenge-link" class="challenge-btn" target="_blank" rel="noopener">Challenge me &#9658;</a>
 </section>
 
-<section id="stats" class="stats"></section>
+<section id="stats" class="stats" style="--i:2"></section>
 
-<section id="performance" class="performance" hidden>
+<section id="performance" class="performance" hidden style="--i:3">
+  <span class="felt-tag">Board Report</span>
   <div class="split">
     <div class="split-row">
       <span>White</span>
@@ -47,7 +78,7 @@
   </div>
 
   <div class="term-section">
-    <span class="sub-label">Game Endings (Recent)</span>
+    <span class="sub-label">how the games ended</span>
     <div class="term-bar">
       <div id="term-mate" class="seg mate" title="Checkmate"></div>
       <div id="term-resign" class="seg resign" title="Resignation"></div>
@@ -68,18 +99,21 @@
   </div>
 </section>
 
-<section id="opponents" class="opponents"></section>
+<div class="ledger-pair" style="--i:4">
+  <section id="opponents" class="opponents"></section>
+  <section id="openings" class="openings"></section>
+</div>
 
-<section id="openings" class="openings"></section>
+<section id="games" class="games" style="--i:5"></section>
 
-<section id="games" class="games"></section>
+</main>
 
 <!-- Game Viewer Modal -->
 <div id="game-modal" class="modal" hidden>
   <div class="modal-content">
     <button id="modal-close" class="modal-close">&times;</button>
     <h3 id="modal-title">Game Review</h3>
-    
+
     <div id="modal-accuracy" class="modal-accuracy" hidden>
       <div class="acc-box">
         <span class="acc-label">White Accuracy</span>
@@ -95,7 +129,7 @@
     </div>
 
     <div class="viewer-body">
-      <div id="board" class="board-wrap"></div>
+      <div id="board" style="width: 280px; margin: 0 auto;"></div>
       <div id="pgn-moves" class="pgn-moves"></div>
     </div>
 
@@ -166,5 +200,15 @@
 <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js"></script>
 <script src="script.js"></script>
+<script>
+  // Loading screen holds for exactly 3 seconds, then reveals the board.
+  setTimeout(function () {
+    var loader = document.getElementById('loading-screen');
+    loader.classList.add('is-hiding');
+    document.body.classList.add('is-revealed');
+    setTimeout(function () { loader.hidden = true; }, 650);
+  }, 3000);
+</script>
 </body>
 </html>
+  
