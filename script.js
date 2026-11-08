@@ -478,8 +478,10 @@ function runQuickStockfishForList(fens, gameId, callback) {
   const blob = new Blob([workerCode], { type: 'application/javascript' });
   const worker = new Worker(URL.createObjectURL(blob));
   
+  const QUICK_DEPTH = 6;
   const evals = [];
   let idx = 0;
+  let lastCp = 0;
   let settled = false;
 
   const timeoutId = setTimeout(() => {
@@ -488,12 +490,17 @@ function runQuickStockfishForList(fens, gameId, callback) {
       worker.terminate();
       callback({ white: 85, black: 85 });
     }
-  }, 20000);
+  }, 25000);
 
   worker.onmessage = function(e) {
     if (settled) return;
     const line = typeof e.data === 'string' ? e.data : '';
     if (line.includes('score cp') || line.includes('score mate')) {
+      // Iterative deepening emits an "info ... score ..." line at every
+      // depth on the way to the target depth - keep only the latest one
+      // and act on it when "bestmove" arrives, otherwise we'd jump on the
+      // very first (depth-1, near-random) line instead of the full-depth
+      // search result.
       let cp = 0;
       const cpMatch = line.match(/score cp (-?\d+)/);
       const mateMatch = line.match(/score mate (-?\d+)/);
@@ -502,22 +509,29 @@ function runQuickStockfishForList(fens, gameId, callback) {
         const m = parseInt(mateMatch[1], 10);
         cp = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
       }
-      if (fens[idx] && fens[idx].includes(' b ')) cp = -cp;
+      lastCp = cp;
+      return;
+    }
 
-      evals.push(cp);
-      idx++;
+    if (line.indexOf('bestmove') !== 0) return;
 
-      if (idx < fens.length) {
-        worker.postMessage('position fen ' + fens[idx]);
-        worker.postMessage('go depth 4');
-      } else {
-        settled = true;
-        clearTimeout(timeoutId);
-        const accs = computeAccuraciesFromEvals(evals);
-        calculatedAccuraciesCache.set(gameId, accs);
-        worker.terminate();
-        callback(accs);
-      }
+    let cp = lastCp;
+    if (fens[idx] && fens[idx].includes(' b ')) cp = -cp;
+
+    evals.push(cp);
+    idx++;
+    lastCp = 0;
+
+    if (idx < fens.length) {
+      worker.postMessage('position fen ' + fens[idx]);
+      worker.postMessage('go depth ' + QUICK_DEPTH);
+    } else {
+      settled = true;
+      clearTimeout(timeoutId);
+      const accs = computeAccuraciesFromEvals(evals);
+      calculatedAccuraciesCache.set(gameId, accs);
+      worker.terminate();
+      callback(accs);
     }
   };
 
@@ -532,7 +546,7 @@ function runQuickStockfishForList(fens, gameId, callback) {
 
   worker.postMessage('uci');
   worker.postMessage('position fen ' + fens[0]);
-  worker.postMessage('go depth 4');
+  worker.postMessage('go depth ' + QUICK_DEPTH);
 }
 
 // Win probability (0-100) from White's perspective, given a centipawn
@@ -689,8 +703,10 @@ function runLocalStockfishAnalysis(fens, gameUrl, onComplete) {
   const blob = new Blob([workerCode], { type: 'application/javascript' });
   engineWorker = new Worker(URL.createObjectURL(blob));
 
+  const MODAL_DEPTH = 10;
   const evals = [];
   let currentFenIndex = 0;
+  let lastCp = 0;
   let settled = false;
 
   const timeoutId = setTimeout(() => {
@@ -702,43 +718,53 @@ function runLocalStockfishAnalysis(fens, gameUrl, onComplete) {
       }
       onComplete({ white: 85, black: 85 });
     }
-  }, 12000);
+  }, 45000);
 
   engineWorker.onmessage = function(e) {
     if (settled) return;
     const line = typeof e.data === 'string' ? e.data : '';
     if (line.includes('score cp') || line.includes('score mate')) {
+      // Keep only the most recent "info ... score ..." line; iterative
+      // deepening reports one per depth on the way to MODAL_DEPTH, and the
+      // real result is whichever one was current right before "bestmove".
       let cp = 0;
       const cpMatch = line.match(/score cp (-?\d+)/);
       const mateMatch = line.match(/score mate (-?\d+)/);
-      
+
       if (cpMatch) cp = parseInt(cpMatch[1], 10);
       else if (mateMatch) {
         const m = parseInt(mateMatch[1], 10);
         cp = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
       }
-      
-      if (fens[currentFenIndex] && fens[currentFenIndex].includes(' b ')) {
-        cp = -cp;
-      }
 
-      evals.push(cp);
-      currentFenIndex++;
+      lastCp = cp;
+      return;
+    }
 
-      if (currentFenIndex < fens.length) {
-        engineWorker.postMessage('position fen ' + fens[currentFenIndex]);
-        engineWorker.postMessage('go depth 6');
-      } else {
-        settled = true;
-        clearTimeout(timeoutId);
-        const results = computeAccuraciesFromEvals(evals);
-        if (gameUrl) calculatedAccuraciesCache.set(gameUrl, results);
-        
-        onComplete(results);
+    if (line.indexOf('bestmove') !== 0) return;
 
-        engineWorker.terminate();
-        engineWorker = null;
-      }
+    let cp = lastCp;
+    if (fens[currentFenIndex] && fens[currentFenIndex].includes(' b ')) {
+      cp = -cp;
+    }
+
+    evals.push(cp);
+    currentFenIndex++;
+    lastCp = 0;
+
+    if (currentFenIndex < fens.length) {
+      engineWorker.postMessage('position fen ' + fens[currentFenIndex]);
+      engineWorker.postMessage('go depth ' + MODAL_DEPTH);
+    } else {
+      settled = true;
+      clearTimeout(timeoutId);
+      const results = computeAccuraciesFromEvals(evals);
+      if (gameUrl) calculatedAccuraciesCache.set(gameUrl, results);
+
+      onComplete(results);
+
+      engineWorker.terminate();
+      engineWorker = null;
     }
   };
 
@@ -756,7 +782,7 @@ function runLocalStockfishAnalysis(fens, gameUrl, onComplete) {
 
   engineWorker.postMessage('uci');
   engineWorker.postMessage('position fen ' + fens[0]);
-  engineWorker.postMessage('go depth 6');
+  engineWorker.postMessage('go depth ' + MODAL_DEPTH);
 }
 
 function renderPgnTranscript() {
