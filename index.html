@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Stats</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+</head>
+<body>
+
+<header class="topbar">
+  <img class="logo" src="pawn.png" alt="Pawn">
+  <h1>Chess Stats</h1>
+</header>
+
+<p id="error" class="error" hidden></p>
+
+<section id="profile" class="profile" hidden>
+  <img id="avatar" alt="">
+  <div class="profile-info">
+    <p id="display-name" class="name"></p>
+    <p id="handle" class="handle"></p>
+    <div class="milestones">
+      <span id="joined"></span>
+      <span id="peak-rating"></span>
+      <span id="total-games"></span>
+    </div>
+  </div>
+  <a id="challenge-link" class="challenge-btn" target="_blank" rel="noopener">Challenge me</a>
+</section>
+
+<section id="stats" class="stats"></section>
+
+<section id="performance" class="performance" hidden>
+  <div class="split">
+    <div class="split-row">
+      <span>White</span>
+      <div class="split-bar"><div id="white-bar" class="split-fill"></div></div>
+      <span id="white-pct"></span>
+    </div>
+    <div class="split-row">
+      <span>Black</span>
+      <div class="split-bar"><div id="black-bar" class="split-fill black"></div></div>
+      <span id="black-pct"></span>
+    </div>
+  </div>
+
+  <div class="term-section">
+    <span class="sub-label">Game Endings (Recent)</span>
+    <div class="term-bar">
+      <div id="term-mate" class="seg mate" title="Checkmate"></div>
+      <div id="term-resign" class="seg resign" title="Resignation"></div>
+      <div id="term-timeout" class="seg timeout" title="Timeout"></div>
+      <div id="term-draw" class="seg draw" title="Draw"></div>
+    </div>
+    <div class="term-legend">
+      <span class="leg mate">Mate</span>
+      <span class="leg resign">Resign</span>
+      <span class="leg timeout">Time</span>
+      <span class="leg draw">Draw</span>
+    </div>
+  </div>
+
+  <div class="meta-metrics">
+    <span id="avg-moves"></span>
+    <span id="streak"></span>
+  </div>
+</section>
+
+<section id="opponents" class="opponents"></section>
+
+<section id="openings" class="openings"></section>
+
+<section id="games" class="games"></section>
+
+<!-- Game Viewer Modal -->
+<div id="game-modal" class="modal" hidden>
+  <div class="modal-content">
+    <button id="modal-close" class="modal-close">&times;</button>
+    <h3 id="modal-title">Game Review</h3>
+    
+    <div id="modal-accuracy" class="modal-accuracy" hidden>
+      <div class="acc-box">
+        <span class="acc-label">White Accuracy</span>
+        <span id="acc-white-val" class="acc-value">--</span>
+        <div class="acc-bar-wrap"><div id="acc-white-fill" class="acc-bar-fill"></div></div>
+      </div>
+      <span class="acc-vs">vs</span>
+      <div class="acc-box">
+        <span class="acc-label">Black Accuracy</span>
+        <span id="acc-black-val" class="acc-value">--</span>
+        <div class="acc-bar-wrap"><div id="acc-black-fill" class="acc-bar-fill black"></div></div>
+      </div>
+    </div>
+
+    <div class="viewer-body">
+      <div id="board" style="width: 280px; margin: 0 auto;"></div>
+      <div id="pgn-moves" class="pgn-moves"></div>
+    </div>
+
+    <div class="modal-controls">
+      <button id="first-move">&vert;&lt;</button>
+      <button id="prev-move">&lt;</button>
+      <button id="play-move">&#9658;</button>
+      <button id="next-move">&gt;</button>
+      <button id="last-move">&gt;&vert;</button>
+    </div>
+  </div>
+</div>
+
+<template id="stat-card">
+  <article class="card">
+    <div class="card-head">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"></svg>
+      <span class="card-title"></span>
+    </div>
+    <p class="rating"></p>
+    <svg class="sparkline" viewBox="0 0 100 24" preserveAspectRatio="none"></svg>
+    <div class="best">
+      <svg class="icon small" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M6 3h12v4a6 6 0 01-5 5.92V16h3v2H8v-2h3v-3.08A6 6 0 016 7V3z" fill="currentColor"/>
+        <path d="M4 5h2v3a3 3 0 01-2-2.82V5z" fill="currentColor"/>
+        <path d="M20 5h-2v3a3 3 0 002-2.82V5z" fill="currentColor"/>
+      </svg>
+      <span class="best-value"></span>
+    </div>
+    <p class="win-pct"></p>
+    <div class="record"></div>
+    <div class="record-bar">
+      <div class="seg win"></div>
+      <div class="seg draw"></div>
+      <div class="seg loss"></div>
+    </div>
+  </article>
+</template>
+
+<template id="opening-row">
+  <div class="opening-row">
+    <span class="opening-name"></span>
+    <span class="opening-winrate"></span>
+  </div>
+</template>
+
+<template id="opponent-row">
+  <div class="opponent-row">
+    <span class="opp-name"></span>
+    <span class="opp-h2h"></span>
+  </div>
+</template>
+
+<template id="game-row">
+  <div class="game-row clickable">
+    <svg class="icon small result-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"></svg>
+    <span class="opponent"></span>
+    <span class="opp-rating"></span>
+    <span class="format"></span>
+    <span class="accuracy"></span>
+    <span class="result-reason"></span>
+    <span class="moves"></span>
+  </div>
+</template>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
