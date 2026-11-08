@@ -728,6 +728,7 @@ h1 {
 .opening-name {
   font-weight: 600;
   font-family: var(--serif);
+  word-break: break-word;
 }
 
 .opp-h2h,
@@ -951,16 +952,23 @@ h1 {
   display: flex;
   gap: 0.9rem;
   margin-top: 0.9rem;
+  min-width: 0;
+}
+
+.board-wrap {
+  flex-shrink: 0;
 }
 
 #board {
   border-radius: 6px;
   overflow: hidden;
   box-shadow: 0 6px 16px rgba(0,0,0,0.5), 0 0 0 4px var(--walnut-light);
+  max-width: 100%;
 }
 
 .pgn-moves {
   flex: 1;
+  min-width: 0;
   max-height: 280px;
   overflow-y: auto;
   background: rgba(0,0,0,0.25);
@@ -972,6 +980,41 @@ h1 {
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 0.3rem;
+}
+
+@media (max-width: 560px) {
+  .modal-content {
+    width: 94vw;
+    max-width: 94vw;
+    padding: 1.1rem 0.9rem 1rem;
+  }
+
+  #modal-title {
+    font-size: 0.98rem;
+  }
+
+  .modal-accuracy {
+    gap: 0.8rem;
+  }
+
+  .viewer-body {
+    flex-direction: column;
+  }
+
+  .board-wrap {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+
+  #board {
+    width: min(78vw, 280px) !important;
+  }
+
+  .pgn-moves {
+    width: 100%;
+    max-height: 150px;
+  }
 }
 
 .move-chip {
@@ -1033,4 +1076,4 @@ h1 {
   .game-row .accuracy { grid-area: accuracy; justify-self: start; }
   .game-row .result-reason { grid-area: reason; justify-self: end; }
   .game-row .moves { grid-area: moves; font-size: 0.72rem; opacity: 0.8; }
-  }
+}
