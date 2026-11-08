@@ -1062,18 +1062,62 @@ h1 {
 
 @media (max-width: 540px) {
   .game-row {
-    grid-template-columns: 20px 1fr auto auto;
-    grid-template-areas:
-      "icon name   rating rating"
-      "icon format accuracy reason"
-      "icon moves  moves  moves";
-    row-gap: 0.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 0.5rem;
+    row-gap: 0.4rem;
+    padding: 0.7rem 0.75rem;
   }
-  .game-row .result-icon { grid-area: icon; }
-  .game-row .opponent { grid-area: name; }
-  .game-row .opp-rating { grid-area: rating; text-align: right; }
-  .game-row .format { grid-area: format; }
-  .game-row .accuracy { grid-area: accuracy; justify-self: start; }
-  .game-row .result-reason { grid-area: reason; justify-self: end; }
-  .game-row .moves { grid-area: moves; font-size: 0.72rem; opacity: 0.8; }
+
+  .game-row .result-icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+  }
+
+  .game-row .opponent {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.88rem;
+  }
+
+  .game-row .opp-rating {
+    flex: 0 0 auto;
+    font-size: 0.78rem;
+  }
+
+  .game-row .format {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    margin-left: 1.55rem;
+  }
+
+  .game-row .accuracy,
+  .game-row .result-reason {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    padding: 0.14rem 0.38rem;
+  }
+
+  .game-row .result-reason {
+    margin-left: auto;
+  }
+
+  .game-row .moves {
+    order: 10;
+    flex: 0 0 auto;
+    width: 100%;
+    margin-left: 1.55rem;
+    font-size: 0.72rem;
+    opacity: 0.75;
+  }
+}
+
+@media (max-width: 360px) {
+  .game-row .opponent { font-size: 0.82rem; }
+  .game-row .opp-rating { font-size: 0.72rem; }
 }
