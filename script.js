@@ -440,7 +440,34 @@ function renderGames(games, username) {
   }
 }
 
+// Every visible game row that needs a calculated badge used to spin up its
+// own Stockfish Worker immediately, so up to ~10 engines ended up running
+// at once, all fighting each other for the same CPU cores - that's most of
+// why this felt so slow. Queue the work instead and only let a couple of
+// engines run at a time; the rest wait their turn.
+const LIST_WORKER_POOL_SIZE = 2;
+const listAccuracyQueue = [];
+let activeListWorkers = 0;
+
 function backgroundCalculateListAccuracy(game, playerSide, badgeEl) {
+  listAccuracyQueue.push({ game, playerSide, badgeEl });
+  pumpListAccuracyQueue();
+}
+
+function pumpListAccuracyQueue() {
+  while (activeListWorkers < LIST_WORKER_POOL_SIZE && listAccuracyQueue.length) {
+    const task = listAccuracyQueue.shift();
+    activeListWorkers++;
+    runListAccuracyTask(task);
+  }
+}
+
+function runListAccuracyTask({ game, playerSide, badgeEl }) {
+  const finishTask = () => {
+    activeListWorkers--;
+    pumpListAccuracyQueue();
+  };
+
   const chess = new Chess();
   try {
     chess.load_pgn(game.pgn);
@@ -451,14 +478,18 @@ function backgroundCalculateListAccuracy(game, playerSide, badgeEl) {
       chess.move(m);
       fens.push(chess.fen());
     }
-    
+
     runQuickStockfishForList(fens, game.url, (accuracies) => {
       if (accuracies && badgeEl) {
         badgeEl.textContent = `${accuracies[playerSide]}% acc`;
+      } else if (badgeEl) {
+        badgeEl.textContent = 'N/A';
       }
+      finishTask();
     });
   } catch (e) {
     if (badgeEl) badgeEl.textContent = 'N/A';
+    finishTask();
   }
 }
 
@@ -478,7 +509,12 @@ function runQuickStockfishForList(fens, gameId, callback) {
   const blob = new Blob([workerCode], { type: 'application/javascript' });
   const worker = new Worker(URL.createObjectURL(blob));
   
+  // Capping depth alone isn't enough - a gnarly middlegame position can
+  // still take the engine a long time to finish deepening to it. Cap the
+  // time per move too, so total calc time stays predictable regardless of
+  // how sharp any one position is.
   const QUICK_DEPTH = 6;
+  const QUICK_MOVETIME_MS = 150;
   const evals = [];
   let idx = 0;
   let lastCp = 0;
@@ -704,6 +740,7 @@ function runLocalStockfishAnalysis(fens, gameUrl, onComplete) {
   engineWorker = new Worker(URL.createObjectURL(blob));
 
   const MODAL_DEPTH = 10;
+  const MODAL_MOVETIME_MS = 400;
   const evals = [];
   let currentFenIndex = 0;
   let lastCp = 0;
