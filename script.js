@@ -488,7 +488,7 @@ function runQuickStockfishForList(fens, gameId, callback) {
       worker.terminate();
       callback({ white: 85, black: 85 });
     }
-  }, 10000);
+  }, 20000);
 
   worker.onmessage = function(e) {
     if (settled) return;
@@ -507,7 +507,7 @@ function runQuickStockfishForList(fens, gameId, callback) {
       evals.push(cp);
       idx++;
 
-      if (idx < fens.length && idx < 30) {
+      if (idx < fens.length) {
         worker.postMessage('position fen ' + fens[idx]);
         worker.postMessage('go depth 4');
       } else {
@@ -535,32 +535,64 @@ function runQuickStockfishForList(fens, gameId, callback) {
   worker.postMessage('go depth 4');
 }
 
+// Win probability (0-100) from White's perspective, given a centipawn
+// score that is also from White's perspective. Same curve chess.com/lichess
+// use to turn an engine eval into a "chance of winning" number.
+function winProbabilityFromCp(cp) {
+  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
+}
+
+// Chess.com's published per-move accuracy curve: a move that doesn't move
+// the needle at all scores ~100, and accuracy falls off exponentially as
+// the win-probability swing against the mover grows.
+function moveAccuracyFromWinPercentDrop(winPercentBefore, winPercentAfter) {
+  const drop = Math.max(0, winPercentBefore - winPercentAfter);
+  const accuracy = 103.1668 * Math.exp(-0.04354 * drop) - 3.1669;
+  return Math.min(100, Math.max(0, accuracy));
+}
+
+function harmonicMean(values) {
+  const sum = values.reduce((acc, v) => acc + 1 / Math.max(v, 0.01), 0);
+  return values.length / sum;
+}
+
+// Chess.com blends the arithmetic mean of per-move accuracies with their
+// harmonic mean, so a handful of bad moves pull the overall score down more
+// than a plain average would - a single 0% blunder in an otherwise clean
+// game should read as noticeably worse than "average it away".
+function overallAccuracy(moveAccuracies) {
+  if (!moveAccuracies.length) return 85;
+  const mean = moveAccuracies.reduce((a, b) => a + b, 0) / moveAccuracies.length;
+  const hMean = harmonicMean(moveAccuracies);
+  return Math.round((mean + hMean) / 2);
+}
+
 function computeAccuraciesFromEvals(cpList) {
-  let whiteAccSum = 0, whiteCount = 0;
-  let blackAccSum = 0, blackCount = 0;
+  const whiteMoveAccuracies = [];
+  const blackMoveAccuracies = [];
 
   for (let i = 1; i < cpList.length; i++) {
-    const prevCp = cpList[i - 1];
-    const currCp = cpList[i];
-    
-    const winProbPrev = 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * prevCp)) - 1);
-    const winProbCurr = 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * currCp)) - 1);
+    const isWhiteMove = i % 2 === 1;
 
-    const delta = Math.max(0, winProbPrev - winProbCurr);
-    const accuracy = Math.max(0, 100 - delta * 2);
+    // cpList is always from White's perspective. White's win% rising is
+    // Black's win% falling and vice versa, so to score a move fairly we
+    // need the win probability from the perspective of whoever just moved,
+    // not White's raw number - otherwise a great move by Black (which
+    // *lowers* White's win%) gets scored as if it were a blunder.
+    const whiteWinBefore = winProbabilityFromCp(cpList[i - 1]);
+    const whiteWinAfter = winProbabilityFromCp(cpList[i]);
+    const moverWinBefore = isWhiteMove ? whiteWinBefore : 100 - whiteWinBefore;
+    const moverWinAfter = isWhiteMove ? whiteWinAfter : 100 - whiteWinAfter;
 
-    if (i % 2 === 1) {
-      whiteAccSum += accuracy;
-      whiteCount++;
-    } else {
-      blackAccSum += accuracy;
-      blackCount++;
-    }
+    const accuracy = moveAccuracyFromWinPercentDrop(moverWinBefore, moverWinAfter);
+
+    if (isWhiteMove) whiteMoveAccuracies.push(accuracy);
+    else blackMoveAccuracies.push(accuracy);
   }
 
   return {
-    white: whiteCount > 0 ? Math.round(whiteAccSum / whiteCount) : 85,
-    black: blackCount > 0 ? Math.round(blackAccSum / blackCount) : 85
+    white: overallAccuracy(whiteMoveAccuracies),
+    black: overallAccuracy(blackMoveAccuracies)
   };
 }
 
@@ -767,6 +799,11 @@ function stopAutoPlay() {
     document.getElementById('play-move').innerHTML = '&#9658;';
   }
 }
+
+window.addEventListener('resize', () => {
+  const modal = document.getElementById('game-modal');
+  if (board && modal && !modal.hidden) board.resize();
+});
 
 document.getElementById('modal-close').addEventListener('click', () => {
   stopAutoPlay();
