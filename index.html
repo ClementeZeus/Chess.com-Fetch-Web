@@ -114,17 +114,15 @@
     <button id="modal-close" class="modal-close">&times;</button>
     <h3 id="modal-title">Game Review</h3>
 
-    <div id="modal-accuracy" class="modal-accuracy" hidden>
-      <div class="acc-box">
-        <span class="acc-label">White Accuracy</span>
-        <span id="acc-white-val" class="acc-value">--</span>
-        <div class="acc-bar-wrap"><div id="acc-white-fill" class="acc-bar-fill"></div></div>
+    <div id="eval-graph" class="eval-graph">
+      <div class="eval-graph-head">
+        <span class="eval-label">Evaluation</span>
+        <span id="eval-readout" class="eval-readout">+0.0</span>
       </div>
-      <span class="acc-vs">vs</span>
-      <div class="acc-box">
-        <span class="acc-label">Black Accuracy</span>
-        <span id="acc-black-val" class="acc-value">--</span>
-        <div class="acc-bar-wrap"><div id="acc-black-fill" class="acc-bar-fill black"></div></div>
+      <svg id="eval-svg" class="eval-svg" viewBox="0 0 300 70" preserveAspectRatio="none"></svg>
+      <div class="eval-foot">
+        <span id="eval-summary" class="eval-summary"></span>
+        <span id="eval-progress" class="eval-progress"></span>
       </div>
     </div>
 
