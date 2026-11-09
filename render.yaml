@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: chess-stats-analysis
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+        
