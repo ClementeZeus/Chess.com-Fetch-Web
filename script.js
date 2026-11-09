@@ -87,7 +87,7 @@ const MODAL_ANALYSIS_DEPTH = 18;
 // Point this at your deployed analysis backend (see chess-analysis-backend/)
 // to get real Stockfish at this depth in seconds instead of the in-browser
 // JS engine taking minutes. Leave it '' to always use the in-browser engine.
-const ANALYSIS_API_BASE = '';
+const ANALYSIS_API_BASE = 'https://chess-stats-fetch.onrender.com/';
 const EVAL_GRAPH_WIDTH = 300;
 const EVAL_GRAPH_HEIGHT = 70;
 
