@@ -72,9 +72,216 @@ let gameStack = [];
 let moveNotationList = [];
 let currentMoveIndex = 0;
 let autoPlayInterval = null;
-let engineWorker = null;
+let activeAnalysis = null;
+let evalSeries = [];
 
-const calculatedAccuraciesCache = new Map();
+// quick, partial-depth estimates behind the "xx% acc" badges in the games list
+const listAccuracyCache = new Map();
+// full-game, fixed-depth analysis (evals + accuracy) behind the review modal
+const fullAnalysisCache = new Map();
+
+const LIST_ACCURACY_DEPTH = 10;
+const LIST_ACCURACY_PLY_CAP = 24;
+const MODAL_ANALYSIS_DEPTH = 18;
+
+// Point this at your deployed analysis backend (see chess-analysis-backend/)
+// to get real Stockfish at this depth in seconds instead of the in-browser
+// JS engine taking minutes. Leave it '' to always use the in-browser engine.
+const ANALYSIS_API_BASE = '';
+const EVAL_GRAPH_WIDTH = 300;
+const EVAL_GRAPH_HEIGHT = 70;
+
+// Same constant Lichess uses to turn a centipawn score into a win probability.
+const WIN_PCT_K = 0.00368208;
+
+// Centipawns (white's perspective) -> white's win probability, 0-100.
+// Going from +5.00 to +4.00 barely moves this number (still ~100% either
+// way); going from +0.50 to -0.50 swings it hard, same as a real game.
+function cpToWhiteWinPercent(cp) {
+  return 100 / (1 + Math.exp(-WIN_PCT_K * cp));
+}
+
+// How much win% a player gave up on one move -> a 0-100 accuracy score.
+// Exponential decay: small slips barely dent the score, a real blunder
+// craters it. Matches the curve chess.com's own accuracy score follows.
+function accuracyFromWinPercentLoss(loss) {
+  const acc = 103.1668 * Math.exp(-0.04354 * loss) - 3.1669;
+  return Math.max(0, Math.min(100, acc));
+}
+
+function formatEval(cp) {
+  if (Math.abs(cp) >= 9000) {
+    const mateIn = Math.max(1, Math.round((10000 - Math.abs(cp)) / 100));
+    return (cp > 0 ? 'M' : '-M') + mateIn;
+  }
+  const pawns = cp / 100;
+  return (pawns >= 0 ? '+' : '') + pawns.toFixed(1);
+}
+
+function createEngineWorker() {
+  const workerCode = `
+    importScripts('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js');
+    var engine = typeof Stockfish === 'function' ? Stockfish() : null;
+    if (engine) {
+      engine.onmessage = function(event) { postMessage(event.data || event); };
+      onmessage = function(e) { engine.postMessage(e.data); };
+    }
+  `;
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  return new Worker(URL.createObjectURL(blob));
+}
+
+// Runs a FIXED-DEPTH search on every fen in order. Each position waits for
+// its own "bestmove" before the next one is sent, so the score banked for
+// a position is always the engine's final depth-N verdict — never a
+// shallow mid-search guess grabbed off an early iterative-deepening line.
+function runEngineAnalysis(fens, depth, { onProgress, onComplete, perMoveTimeoutMs = 25000 } = {}) {
+  if (!window.Worker) {
+    onComplete(fens.map(() => 0));
+    return { cancel() {} };
+  }
+
+  const worker = createEngineWorker();
+  const evals = [];
+  let idx = 0;
+  let lastScore = 0;
+  let cancelled = false;
+  let watchdog = null;
+
+  function parseScore(line) {
+    let cp = 0;
+    const cpMatch = line.match(/score cp (-?\d+)/);
+    const mateMatch = line.match(/score mate (-?\d+)/);
+    if (cpMatch) cp = parseInt(cpMatch[1], 10);
+    else if (mateMatch) {
+      const m = parseInt(mateMatch[1], 10);
+      cp = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
+    }
+    // UCI scores are relative to the side to move; normalize to white's view.
+    if (fens[idx] && fens[idx].includes(' b ')) cp = -cp;
+    return cp;
+  }
+
+  function advance() {
+    evals.push(lastScore);
+    idx++;
+    if (onProgress) onProgress(idx, fens.length, evals[idx - 1]);
+    if (idx < fens.length) searchNext();
+    else finish();
+  }
+
+  function searchNext() {
+    if (cancelled) return;
+    clearTimeout(watchdog);
+    // Safety valve: a single ugly tactical position shouldn't stall the
+    // whole game review. Bank the best score seen so far and move on.
+    watchdog = setTimeout(advance, perMoveTimeoutMs);
+    worker.postMessage('position fen ' + fens[idx]);
+    worker.postMessage('go depth ' + depth);
+  }
+
+  function finish() {
+    clearTimeout(watchdog);
+    if (!cancelled && onComplete) onComplete(evals);
+    worker.terminate();
+  }
+
+  worker.onmessage = function (e) {
+    if (cancelled) return;
+    const line = typeof e.data === 'string' ? e.data : '';
+    if (line.includes('score cp') || line.includes('score mate')) {
+      lastScore = parseScore(line);
+    } else if (line.indexOf('bestmove') === 0) {
+      clearTimeout(watchdog);
+      advance();
+    }
+  };
+
+  worker.onerror = function () {
+    clearTimeout(watchdog);
+    if (!cancelled && onComplete) onComplete(evals.length ? evals : fens.map(() => 0));
+    worker.terminate();
+  };
+
+  worker.postMessage('uci');
+  searchNext();
+
+  return {
+    cancel() {
+      cancelled = true;
+      clearTimeout(watchdog);
+      worker.terminate();
+    }
+  };
+}
+
+// Tries the real-Stockfish backend first (fast, true fixed-depth 18-20);
+// falls back to the in-browser engine if the backend isn't configured,
+// unreachable, or errors out mid-job — the app keeps working either way.
+function analyzeGame(fens, depth, callbacks) {
+  if (!ANALYSIS_API_BASE) {
+    return runEngineAnalysis(fens, depth, callbacks);
+  }
+  return runRemoteAnalysis(fens, depth, callbacks);
+}
+
+function runRemoteAnalysis(fens, depth, { onProgress, onComplete } = {}) {
+  let cancelled = false;
+  let jobId = null;
+  let pollTimer = null;
+  let fellBack = false;
+
+  function fallBackToLocal() {
+    if (cancelled || fellBack) return;
+    fellBack = true;
+    clearTimeout(pollTimer);
+    const local = runEngineAnalysis(fens, depth, { onProgress, onComplete });
+    handle.cancel = local.cancel;
+  }
+
+  function poll() {
+    if (cancelled || fellBack) return;
+    fetch(`${ANALYSIS_API_BASE}/analyze/${jobId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled || fellBack) return;
+        if (data.status === 'running') {
+          if (onProgress && data.done > 0) onProgress(data.done, data.total, data.evals[data.evals.length - 1]);
+          pollTimer = setTimeout(poll, 700);
+        } else if (data.status === 'complete') {
+          if (onComplete) onComplete(data.evals);
+        } else {
+          fallBackToLocal();
+        }
+      })
+      .catch(fallBackToLocal);
+  }
+
+  const handle = {
+    cancel() {
+      cancelled = true;
+      clearTimeout(pollTimer);
+      if (jobId) {
+        fetch(`${ANALYSIS_API_BASE}/analyze/${jobId}`, { method: 'DELETE' }).catch(() => {});
+      }
+    }
+  };
+
+  fetch(`${ANALYSIS_API_BASE}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fens, depth })
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      if (cancelled) return;
+      jobId = data.job_id;
+      poll();
+    })
+    .catch(fallBackToLocal);
+
+  return handle;
+}
 
 init();
 
@@ -423,8 +630,8 @@ function renderGames(games, username) {
     if (accEl) {
       if (g.accuracies && g.accuracies[s] !== undefined) {
         accEl.textContent = `${Math.round(g.accuracies[s])}% acc`;
-      } else if (calculatedAccuraciesCache.has(g.url)) {
-        const cachedAcc = calculatedAccuraciesCache.get(g.url);
+      } else if (listAccuracyCache.has(g.url)) {
+        const cachedAcc = listAccuracyCache.get(g.url);
         accEl.textContent = `${cachedAcc[s]}% acc`;
       } else {
         accEl.textContent = 'calc acc...';
@@ -440,34 +647,7 @@ function renderGames(games, username) {
   }
 }
 
-// Every visible game row that needs a calculated badge used to spin up its
-// own Stockfish Worker immediately, so up to ~10 engines ended up running
-// at once, all fighting each other for the same CPU cores - that's most of
-// why this felt so slow. Queue the work instead and only let a couple of
-// engines run at a time; the rest wait their turn.
-const LIST_WORKER_POOL_SIZE = 2;
-const listAccuracyQueue = [];
-let activeListWorkers = 0;
-
 function backgroundCalculateListAccuracy(game, playerSide, badgeEl) {
-  listAccuracyQueue.push({ game, playerSide, badgeEl });
-  pumpListAccuracyQueue();
-}
-
-function pumpListAccuracyQueue() {
-  while (activeListWorkers < LIST_WORKER_POOL_SIZE && listAccuracyQueue.length) {
-    const task = listAccuracyQueue.shift();
-    activeListWorkers++;
-    runListAccuracyTask(task);
-  }
-}
-
-function runListAccuracyTask({ game, playerSide, badgeEl }) {
-  const finishTask = () => {
-    activeListWorkers--;
-    pumpListAccuracyQueue();
-  };
-
   const chess = new Chess();
   try {
     chess.load_pgn(game.pgn);
@@ -479,190 +659,77 @@ function runListAccuracyTask({ game, playerSide, badgeEl }) {
       fens.push(chess.fen());
     }
 
-    runQuickStockfishForList(fens, game.url, (accuracies) => {
-      if (accuracies && badgeEl) {
-        badgeEl.textContent = `${accuracies[playerSide]}% acc`;
-      } else if (badgeEl) {
-        badgeEl.textContent = 'N/A';
+    // A quick, partial-depth read for the list badge — just enough plies
+    // and depth to be responsive with ten of these running at once. The
+    // modal's full review (opened per-game, on request) goes to full
+    // depth across the whole game instead.
+    const trimmed = fens.slice(0, LIST_ACCURACY_PLY_CAP + 1);
+
+    analyzeGame(trimmed, LIST_ACCURACY_DEPTH, {
+      onComplete: (evals) => {
+        if (!evals.length) {
+          if (badgeEl) badgeEl.textContent = 'N/A';
+          return;
+        }
+        const accs = computeAccuraciesFromEvals(evals);
+        listAccuracyCache.set(game.url, accs);
+        if (badgeEl) badgeEl.textContent = `${accs[playerSide]}% acc`;
       }
-      finishTask();
     });
   } catch (e) {
     if (badgeEl) badgeEl.textContent = 'N/A';
-    finishTask();
   }
 }
 
-function runQuickStockfishForList(fens, gameId, callback) {
-  if (!window.Worker) {
-    callback(null);
-    return;
-  }
-  const workerCode = `
-    importScripts('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js');
-    var engine = typeof Stockfish === 'function' ? Stockfish() : null;
-    if (engine) {
-      engine.onmessage = function(event) { postMessage(event.data || event); };
-      onmessage = function(e) { engine.postMessage(e.data); };
-    }
-  `;
-  const blob = new Blob([workerCode], { type: 'application/javascript' });
-  const worker = new Worker(URL.createObjectURL(blob));
-  
-  // Capping depth alone isn't enough - a gnarly middlegame position can
-  // still take the engine a long time to finish deepening to it. Cap the
-  // time per move too, so total calc time stays predictable regardless of
-  // how sharp any one position is.
-  const QUICK_DEPTH = 6;
-  const QUICK_MOVETIME_MS = 150;
-  const evals = [];
-  let idx = 0;
-  let lastCp = 0;
-  let settled = false;
+// evals[0] is the start position; evals[i] is the position after ply i
+// (white's move when i is odd, black's when i is even). For each ply we
+// measure the win% the MOVER gave up on their own move — not just the
+// raw white-perspective swing — so a good black move is never mistaken
+// for a black blunder and vice versa.
+function computeAccuraciesFromEvals(evals) {
+  const winSeries = evals.map(cpToWhiteWinPercent);
+  let whiteSum = 0, whiteCount = 0;
+  let blackSum = 0, blackCount = 0;
 
-  const timeoutId = setTimeout(() => {
-    if (!settled) {
-      settled = true;
-      worker.terminate();
-      callback({ white: 85, black: 85 });
-    }
-  }, 25000);
+  for (let i = 1; i < winSeries.length; i++) {
+    const before = winSeries[i - 1];
+    const after = winSeries[i];
+    const whiteMoved = i % 2 === 1;
+    const loss = whiteMoved ? Math.max(0, before - after) : Math.max(0, after - before);
+    const accuracy = accuracyFromWinPercentLoss(loss);
 
-  worker.onmessage = function(e) {
-    if (settled) return;
-    const line = typeof e.data === 'string' ? e.data : '';
-    if (line.includes('score cp') || line.includes('score mate')) {
-      // Iterative deepening emits an "info ... score ..." line at every
-      // depth on the way to the target depth - keep only the latest one
-      // and act on it when "bestmove" arrives, otherwise we'd jump on the
-      // very first (depth-1, near-random) line instead of the full-depth
-      // search result.
-      let cp = 0;
-      const cpMatch = line.match(/score cp (-?\d+)/);
-      const mateMatch = line.match(/score mate (-?\d+)/);
-      if (cpMatch) cp = parseInt(cpMatch[1], 10);
-      else if (mateMatch) {
-        const m = parseInt(mateMatch[1], 10);
-        cp = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
-      }
-      lastCp = cp;
-      return;
-    }
-
-    if (line.indexOf('bestmove') !== 0) return;
-
-    let cp = lastCp;
-    if (fens[idx] && fens[idx].includes(' b ')) cp = -cp;
-
-    evals.push(cp);
-    idx++;
-    lastCp = 0;
-
-    if (idx < fens.length) {
-      worker.postMessage('position fen ' + fens[idx]);
-      worker.postMessage('go depth ' + QUICK_DEPTH);
+    if (whiteMoved) {
+      whiteSum += accuracy;
+      whiteCount++;
     } else {
-      settled = true;
-      clearTimeout(timeoutId);
-      const accs = computeAccuraciesFromEvals(evals);
-      calculatedAccuraciesCache.set(gameId, accs);
-      worker.terminate();
-      callback(accs);
+      blackSum += accuracy;
+      blackCount++;
     }
-  };
-
-  worker.onerror = function() {
-    if (!settled) {
-      settled = true;
-      clearTimeout(timeoutId);
-      worker.terminate();
-      callback(null);
-    }
-  };
-
-  worker.postMessage('uci');
-  worker.postMessage('position fen ' + fens[0]);
-  worker.postMessage('go depth ' + QUICK_DEPTH);
-}
-
-// Win probability (0-100) from White's perspective, given a centipawn
-// score that is also from White's perspective. Same curve chess.com/lichess
-// use to turn an engine eval into a "chance of winning" number.
-function winProbabilityFromCp(cp) {
-  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
-}
-
-// Chess.com's published per-move accuracy curve: a move that doesn't move
-// the needle at all scores ~100, and accuracy falls off exponentially as
-// the win-probability swing against the mover grows.
-function moveAccuracyFromWinPercentDrop(winPercentBefore, winPercentAfter) {
-  const drop = Math.max(0, winPercentBefore - winPercentAfter);
-  const accuracy = 103.1668 * Math.exp(-0.04354 * drop) - 3.1669;
-  return Math.min(100, Math.max(0, accuracy));
-}
-
-function harmonicMean(values) {
-  const sum = values.reduce((acc, v) => acc + 1 / Math.max(v, 0.01), 0);
-  return values.length / sum;
-}
-
-// Chess.com blends the arithmetic mean of per-move accuracies with their
-// harmonic mean, so a handful of bad moves pull the overall score down more
-// than a plain average would - a single 0% blunder in an otherwise clean
-// game should read as noticeably worse than "average it away".
-function overallAccuracy(moveAccuracies) {
-  if (!moveAccuracies.length) return 85;
-  const mean = moveAccuracies.reduce((a, b) => a + b, 0) / moveAccuracies.length;
-  const hMean = harmonicMean(moveAccuracies);
-  return Math.round((mean + hMean) / 2);
-}
-
-function computeAccuraciesFromEvals(cpList) {
-  const whiteMoveAccuracies = [];
-  const blackMoveAccuracies = [];
-
-  for (let i = 1; i < cpList.length; i++) {
-    const isWhiteMove = i % 2 === 1;
-
-    // cpList is always from White's perspective. White's win% rising is
-    // Black's win% falling and vice versa, so to score a move fairly we
-    // need the win probability from the perspective of whoever just moved,
-    // not White's raw number - otherwise a great move by Black (which
-    // *lowers* White's win%) gets scored as if it were a blunder.
-    const whiteWinBefore = winProbabilityFromCp(cpList[i - 1]);
-    const whiteWinAfter = winProbabilityFromCp(cpList[i]);
-    const moverWinBefore = isWhiteMove ? whiteWinBefore : 100 - whiteWinBefore;
-    const moverWinAfter = isWhiteMove ? whiteWinAfter : 100 - whiteWinAfter;
-
-    const accuracy = moveAccuracyFromWinPercentDrop(moverWinBefore, moverWinAfter);
-
-    if (isWhiteMove) whiteMoveAccuracies.push(accuracy);
-    else blackMoveAccuracies.push(accuracy);
   }
 
   return {
-    white: overallAccuracy(whiteMoveAccuracies),
-    black: overallAccuracy(blackMoveAccuracies)
+    white: whiteCount > 0 ? Math.round(whiteSum / whiteCount) : 85,
+    black: blackCount > 0 ? Math.round(blackSum / blackCount) : 85
   };
 }
 
 async function openGameModal(game, username) {
   stopAutoPlay();
+  if (activeAnalysis) {
+    activeAnalysis.cancel();
+    activeAnalysis = null;
+  }
+
   const modal = document.getElementById('game-modal');
   modal.hidden = false;
 
-  const accuracyBox = document.getElementById('modal-accuracy');
-  if (accuracyBox) accuracyBox.hidden = false;
-  
-  const wVal = document.getElementById('acc-white-val');
-  const bVal = document.getElementById('acc-black-val');
-  const wFill = document.getElementById('acc-white-fill');
-  const bFill = document.getElementById('acc-black-fill');
+  const progressEl = document.getElementById('eval-progress');
+  const summaryEl = document.getElementById('eval-summary');
 
-  if (wVal) wVal.textContent = 'Calc...';
-  if (bVal) bVal.textContent = 'Calc...';
-  if (wFill) wFill.style.width = '0%';
-  if (bFill) bFill.style.width = '0%';
+  evalSeries = [];
+  renderEvalGraph([]);
+  if (summaryEl) summaryEl.textContent = '';
+  if (progressEl) progressEl.textContent = `warming up the engine (depth ${MODAL_ANALYSIS_DEPTH})…`;
 
   const chess = new Chess();
   chess.load_pgn(game.pgn);
@@ -701,125 +768,94 @@ async function openGameModal(game, username) {
   document.getElementById('modal-title').textContent = `${game.white.username} vs ${game.black.username}`;
   updateMoveHighlight();
 
-  function displayModalAccuracies(res) {
-    if (wVal) wVal.textContent = `${res.white}%`;
-    if (bVal) bVal.textContent = `${res.black}%`;
-    if (wFill) wFill.style.width = `${res.white}%`;
-    if (bFill) bFill.style.width = `${res.black}%`;
+  function showAccuracySummary(accs) {
+    if (summaryEl) summaryEl.textContent = `White ${accs.white}% · Black ${accs.black}% accuracy`;
   }
 
-  if (game.accuracies && game.accuracies.white !== undefined) {
-    displayModalAccuracies({
-      white: Math.round(game.accuracies.white),
-      black: Math.round(game.accuracies.black)
-    });
-  } else if (calculatedAccuraciesCache.has(game.url)) {
-    displayModalAccuracies(calculatedAccuraciesCache.get(game.url));
-  } else {
-    runLocalStockfishAnalysis(gameStack, game.url, displayModalAccuracies);
-  }
-}
+  const officialAccuracy = game.accuracies && game.accuracies.white !== undefined
+    ? { white: Math.round(game.accuracies.white), black: Math.round(game.accuracies.black) }
+    : null;
 
-function runLocalStockfishAnalysis(fens, gameUrl, onComplete) {
-  if (!window.Worker) {
-    onComplete({ white: 85, black: 85 });
+  const cached = fullAnalysisCache.get(game.url);
+  if (cached) {
+    evalSeries = cached.evals;
+    renderEvalGraph(evalSeries);
+    updateEvalMarker(currentMoveIndex);
+    if (progressEl) progressEl.textContent = `depth ${MODAL_ANALYSIS_DEPTH} · ${evalSeries.length - 1} moves`;
+    showAccuracySummary(officialAccuracy || cached.accuracy);
     return;
   }
-  if (engineWorker) engineWorker.terminate();
 
-  const workerCode = `
-    importScripts('https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js');
-    var engine = typeof Stockfish === 'function' ? Stockfish() : null;
-    if (engine) {
-      engine.onmessage = function(event) { postMessage(event.data || event); };
-      onmessage = function(e) { engine.postMessage(e.data); };
+  const runningEvals = [];
+  activeAnalysis = analyzeGame(gameStack, MODAL_ANALYSIS_DEPTH, {
+    onProgress: (done, total, latestCp) => {
+      runningEvals[done - 1] = latestCp;
+      evalSeries = runningEvals.slice(0, done);
+      renderEvalGraph(evalSeries);
+      updateEvalMarker(Math.min(currentMoveIndex, done - 1));
+      if (progressEl) {
+        progressEl.textContent = `depth ${MODAL_ANALYSIS_DEPTH} · analyzing move ${done}/${total - 1}…`;
+      }
+    },
+    onComplete: (evals) => {
+      evalSeries = evals;
+      const accuracy = computeAccuraciesFromEvals(evals);
+      fullAnalysisCache.set(game.url, { evals, accuracy });
+      renderEvalGraph(evalSeries);
+      updateEvalMarker(currentMoveIndex);
+      if (progressEl) progressEl.textContent = `depth ${MODAL_ANALYSIS_DEPTH} · analysis complete`;
+      showAccuracySummary(officialAccuracy || accuracy);
+      activeAnalysis = null;
     }
+  });
+}
+
+// Draws the evaluation swing as a two-tone area chart: the cream region is
+// white's share of the position (by win%), the dark region is black's —
+// the boundary between them is the line that climbs and dives every move.
+function renderEvalGraph(evals) {
+  const svg = document.getElementById('eval-svg');
+  if (!svg) return;
+
+  if (!evals.length) {
+    svg.innerHTML = `<line x1="0" y1="${EVAL_GRAPH_HEIGHT / 2}" x2="${EVAL_GRAPH_WIDTH}" y2="${EVAL_GRAPH_HEIGHT / 2}" class="eval-mid"/>`;
+    return;
+  }
+
+  const n = evals.length;
+  const step = n > 1 ? EVAL_GRAPH_WIDTH / (n - 1) : EVAL_GRAPH_WIDTH;
+  const points = evals.map((cp, i) => {
+    const whiteWinPct = cpToWhiteWinPercent(cp);
+    const y = EVAL_GRAPH_HEIGHT - (whiteWinPct / 100) * EVAL_GRAPH_HEIGHT;
+    return [i * step, y];
+  });
+
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  const whiteArea = `${linePath} L${EVAL_GRAPH_WIDTH},${EVAL_GRAPH_HEIGHT} L0,${EVAL_GRAPH_HEIGHT} Z`;
+  const blackArea = `${linePath} L${EVAL_GRAPH_WIDTH},0 L0,0 Z`;
+
+  svg.innerHTML = `
+    <path d="${blackArea}" class="eval-area-black"/>
+    <path d="${whiteArea}" class="eval-area-white"/>
+    <line x1="0" y1="${EVAL_GRAPH_HEIGHT / 2}" x2="${EVAL_GRAPH_WIDTH}" y2="${EVAL_GRAPH_HEIGHT / 2}" class="eval-mid"/>
+    <path d="${linePath}" class="eval-line"/>
+    <line id="eval-marker" x1="0" y1="0" x2="0" y2="${EVAL_GRAPH_HEIGHT}" class="eval-marker"/>
   `;
+}
 
-  const blob = new Blob([workerCode], { type: 'application/javascript' });
-  engineWorker = new Worker(URL.createObjectURL(blob));
+function updateEvalMarker(moveIndex) {
+  const marker = document.getElementById('eval-marker');
+  const readoutEl = document.getElementById('eval-readout');
+  if (!marker || !evalSeries.length) return;
 
-  const MODAL_DEPTH = 10;
-  const MODAL_MOVETIME_MS = 400;
-  const evals = [];
-  let currentFenIndex = 0;
-  let lastCp = 0;
-  let settled = false;
+  const n = evalSeries.length;
+  const clamped = Math.max(0, Math.min(moveIndex, n - 1));
+  const step = n > 1 ? EVAL_GRAPH_WIDTH / (n - 1) : EVAL_GRAPH_WIDTH;
+  const x = clamped * step;
+  marker.setAttribute('x1', x.toFixed(1));
+  marker.setAttribute('x2', x.toFixed(1));
 
-  const timeoutId = setTimeout(() => {
-    if (!settled) {
-      settled = true;
-      if (engineWorker) {
-        engineWorker.terminate();
-        engineWorker = null;
-      }
-      onComplete({ white: 85, black: 85 });
-    }
-  }, 45000);
-
-  engineWorker.onmessage = function(e) {
-    if (settled) return;
-    const line = typeof e.data === 'string' ? e.data : '';
-    if (line.includes('score cp') || line.includes('score mate')) {
-      // Keep only the most recent "info ... score ..." line; iterative
-      // deepening reports one per depth on the way to MODAL_DEPTH, and the
-      // real result is whichever one was current right before "bestmove".
-      let cp = 0;
-      const cpMatch = line.match(/score cp (-?\d+)/);
-      const mateMatch = line.match(/score mate (-?\d+)/);
-
-      if (cpMatch) cp = parseInt(cpMatch[1], 10);
-      else if (mateMatch) {
-        const m = parseInt(mateMatch[1], 10);
-        cp = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
-      }
-
-      lastCp = cp;
-      return;
-    }
-
-    if (line.indexOf('bestmove') !== 0) return;
-
-    let cp = lastCp;
-    if (fens[currentFenIndex] && fens[currentFenIndex].includes(' b ')) {
-      cp = -cp;
-    }
-
-    evals.push(cp);
-    currentFenIndex++;
-    lastCp = 0;
-
-    if (currentFenIndex < fens.length) {
-      engineWorker.postMessage('position fen ' + fens[currentFenIndex]);
-      engineWorker.postMessage('go depth ' + MODAL_DEPTH);
-    } else {
-      settled = true;
-      clearTimeout(timeoutId);
-      const results = computeAccuraciesFromEvals(evals);
-      if (gameUrl) calculatedAccuraciesCache.set(gameUrl, results);
-
-      onComplete(results);
-
-      engineWorker.terminate();
-      engineWorker = null;
-    }
-  };
-
-  engineWorker.onerror = function() {
-    if (!settled) {
-      settled = true;
-      clearTimeout(timeoutId);
-      if (engineWorker) {
-        engineWorker.terminate();
-        engineWorker = null;
-      }
-      onComplete({ white: 85, black: 85 });
-    }
-  };
-
-  engineWorker.postMessage('uci');
-  engineWorker.postMessage('position fen ' + fens[0]);
-  engineWorker.postMessage('go depth ' + MODAL_DEPTH);
+  if (readoutEl) readoutEl.textContent = formatEval(evalSeries[clamped]);
 }
 
 function renderPgnTranscript() {
@@ -853,6 +889,7 @@ function jumpToMove(index) {
   currentMoveIndex = index;
   board.position(gameStack[currentMoveIndex]);
   updateMoveHighlight();
+  updateEvalMarker(currentMoveIndex);
 }
 
 function stopAutoPlay() {
@@ -863,16 +900,11 @@ function stopAutoPlay() {
   }
 }
 
-window.addEventListener('resize', () => {
-  const modal = document.getElementById('game-modal');
-  if (board && modal && !modal.hidden) board.resize();
-});
-
 document.getElementById('modal-close').addEventListener('click', () => {
   stopAutoPlay();
-  if (engineWorker) {
-    engineWorker.terminate();
-    engineWorker = null;
+  if (activeAnalysis) {
+    activeAnalysis.cancel();
+    activeAnalysis = null;
   }
   document.getElementById('game-modal').hidden = true;
 });
